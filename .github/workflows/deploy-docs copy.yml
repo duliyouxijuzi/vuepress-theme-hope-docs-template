@@ -1,0 +1,202 @@
+name: gitbook-build
+run-name: ${{ github.actor }} is building gitbook
+
+on:
+  push:
+    branches:
+      - main  
+  workflow_dispatch:
+    inputs:
+      parameter-name:
+        description: 'Manual Build'
+        required: true
+        default: 'default-value'
+        
+jobs:
+  init-env:
+    env:
+      CHANGE_PACKAGE: false
+      COMMON_OLD_CACHE_KEY: "xxx"
+      COMMON_NEW_CACHE_KEY: "yyy"
+
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Cache Node.js modules
+      uses: actions/cache@v3
+      id: cache-npm
+      with:
+        path: ./node_modules
+        key: Linux-node_modules-${{ hashFiles('./package-lock.json') }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '10.24.1'
+
+    - name: Set COMMON_OLD_CACHE_KEY
+      run: echo "COMMON_OLD_CACHE_KEY=Linux-node_modules-${{ hashFiles('./package-lock.json') }}" >> $GITHUB_ENV
+
+    - name: Install gitbook-cli
+      run: |
+        if [ ! -f ./node_modules/.bin/gitbook ]; then
+          echo "Installing gitbook-cli..."
+          npm install gitbook-cli
+        else
+          echo "gitbook-cli is already installed."
+        fi
+
+    - name: Install GitBook dependencies and update npm
+      run: |
+        npx gitbook install
+        npm install
+    
+    - name: set CHANGE_PACKAGE
+      run: |
+        echo "COMMON_NEW_CACHE_KEY=Linux-node_modules-${{ hashFiles('./package-lock.json') }}" >> $GITHUB_ENV
+        if [[ "${{env.COMMON_NEW_CACHE_KEY}}" == "${{env.COMMON_OLD_CACHE_KEY}}" ]]; then
+          CHANGE_PACKAGE_VALUE=false
+        else
+          CHANGE_PACKAGE_VALUE=true
+        fi
+        if [[ ${{ steps.cache-npm.outputs.cache-hit != 'true' }} ]]; then
+          CHANGE_PACKAGE_VALUE=true
+        fi
+        echo "CHANGE_PACKAGE_VALUE = ${CHANGE_PACKAGE_VALUE}"
+        echo "CHANGE_PACKAGE=${CHANGE_PACKAGE_VALUE}" >> $GITHUB_ENV
+
+    - if: ${{ env.CHANGE_PACKAGE == 'true' }}
+      name: Cleanup Cache
+      env:
+        GH_TOKEN: ${{ secrets.DEV_TOKEN}}
+      run: |
+        gh extension install actions/gh-actions-cache
+
+        echo "Fetching list of cache keys"
+        cacheKeysForPR=$(gh actions-cache list -R ${{ github.repository }} -B ${{ github.ref }} | grep -E "^Linux-node_modules-.*" | cut -f 1)
+
+        echo "Deleting caches..."
+        for cacheKey in $cacheKeysForPR
+          do
+            if [ ${cacheKey} != ${{env.COMMON_NEW_CACHE_KEY}} ]; then
+              gh actions-cache delete $cacheKey -R ${{ github.repository }} -B ${{ github.ref }} --confirm
+            else
+              echo "No need delete ${cacheKey}"
+            fi
+          done
+        echo "Done"
+
+    - if: ${{ env.CHANGE_PACKAGE == 'true' }}
+      name: Update Cache
+      uses: actions/cache@v3
+      with:
+        path: ./node_modules
+        key: Linux-node_modules-${{ hashFiles('./package-lock.json') }}
+    
+    - if: ${{ env.CHANGE_PACKAGE == 'true' }}    
+      name: Configure Git
+      run: |
+        if [ -z "$(git config --get user.email)" ]; then
+          echo "config git email"
+          git config --global user.email "actions@github.com"
+        fi
+        if [ -z "$(git config --get user.name)" ]; then
+          echo "config git name"
+          git config --global user.name "GitHub Actions"
+        fi
+
+    - if: ${{ env.CHANGE_PACKAGE == 'true' }}
+      name: Commit and push changes
+
+      env:
+        GH_TOKEN: ${{ secrets.DEV_TOKEN}}
+      run: |
+        git status
+        git pull origin main
+        git add -A
+        git diff-index --quiet HEAD || git commit -m "Update GitBook Package File [skip ci]"
+        git push
+
+  build:
+    needs: [init-env]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Cache Node.js modules
+      uses: actions/cache@v3
+      with:
+        path: ./node_modules
+        key: Linux-node_modules-${{ hashFiles('./package-lock.json') }}
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '10.24.1'
+    
+    - name: Build Gitbook
+      run: |
+        if [ -f ./node_modules/.bin/gitbook ]; then
+          echo "init gitbook"
+          npx gitbook init
+          if [! -f ./docs ]; then
+            mkdir docs
+          fi
+          npx gitbook build ./ ./docs
+          ls -s
+        fi
+
+    - name: Configure Git
+      run: |
+        if [ -z "$(git config --get user.email)" ]; then
+          echo "config git email"
+          git config --global user.email "actions@github.com"
+        fi
+        if [ -z "$(git config --get user.name)" ]; then
+          echo "config git name"
+          git config --global user.name "GitHub Actions"
+        fi    
+
+    - name: Commit and push changes
+      env:
+        GH_TOKEN: ${{ secrets.DEV_TOKEN}}
+      run: |
+        git status
+        git pull origin main
+        git add -A
+        git diff-index --quiet HEAD || git commit -m "Update GitBook Build [skip ci]"
+        git push
+  
+  deploy-page:
+    needs: [build]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+    
+      - name: Setup Pages
+        uses: actions/configure-pages@v3  
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v2
+        with:
+          # Upload entire repository
+          path: './docs'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
+
+
